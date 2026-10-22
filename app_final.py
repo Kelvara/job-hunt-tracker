@@ -154,6 +154,10 @@ class StatusChange(BaseModel):
     changed_on: date
 
 
+class StatusUpdate(BaseModel):
+    status: Status
+
+
 class Application(ApplicationCreate):
     """Отклик целиком: поля пользователя + поля, которые заполняет сервис."""
 
@@ -263,6 +267,15 @@ def find_application(application_id: str) -> Application:
     return application
 
 
+def find_duplicate(data: ApplicationCreate) -> Application | None:
+    """Дубль — та же ссылка или та же пара «компания + роль» (без учёта регистра и пробелов)."""
+    key = (data.company.strip().lower(), data.role.strip().lower())
+    for application in applications.values():
+        if application.link == data.link or (application.company.strip().lower(), application.role.strip().lower()) == key:
+            return application
+    return None
+
+
 # --- Приложение и маршруты ---
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
@@ -295,3 +308,35 @@ def list_applications(status: Status | None = None) -> list[Application]:
 @app.get("/applications/{application_id}")
 def get_application(application_id: str) -> Application:
     return find_application(application_id)
+
+
+@app.post("/applications", status_code=201)
+def create_application(data: ApplicationCreate) -> Application:
+    """Добавляет отклик; повторная вакансия — 409."""
+    duplicate = find_duplicate(data)
+    if duplicate is not None:
+        logger.warning("Duplicate application rejected: %s, %s (already %s)", data.company, data.role, duplicate.id)
+        raise HTTPException(status_code=409, detail=f"Application already exists: {duplicate.id}")
+    application = add_application(data)
+    logger.info("Created application %s: %s, %s [%s]", application.id, application.company, application.role,
+                application.status)
+    return application
+
+
+@app.patch("/applications/{application_id}/status")
+def update_status(application_id: str, update: StatusUpdate) -> Application:
+    """Меняет статус: пишет его в историю и пересчитывает следующий шаг."""
+    application = find_application(application_id)
+    if update.status == application.status:
+        return application
+    today = date.today()
+    old_status = application.status
+    application.status = update.status
+    application.status_history.append(StatusChange(status=update.status, changed_on=today))
+    if update.status == Status.APPLIED and application.date_applied is None:
+        application.date_applied = today
+    application.next_action, application.follow_up_date = plan_next_step(
+        update.status, today, application.date_applied
+    )
+    logger.info("Application %s status: %s -> %s", application.id, old_status, update.status)
+    return application
