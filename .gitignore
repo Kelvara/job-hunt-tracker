@@ -1,0 +1,15 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local secrets and settings (commit only .env.example)
+.env
+
+# macOS and editors
+.DS_Store
+.vscode/
+.idea/
