@@ -5,10 +5,11 @@
 
 import logging
 import os
+import time
 from datetime import date, timedelta
 from enum import StrEnum
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 APP_NAME = "Job Hunt Tracker"
@@ -282,6 +283,17 @@ app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
 logger.info("Starting %s, version %s, FOLLOW_UP_DAYS=%d", APP_NAME, APP_VERSION, FOLLOW_UP_DAYS)
 load_demo_data()
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Пишет в лог каждый запрос: метод, путь, код ответа и время обработки."""
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    target = request.url.path + (f"?{request.url.query}" if request.url.query else "")
+    logger.info("%s %s -> %d (%.1f ms)", request.method, target, response.status_code, elapsed_ms)
+    return response
 
 
 @app.get("/")
