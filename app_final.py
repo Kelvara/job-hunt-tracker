@@ -9,7 +9,7 @@ import time
 from datetime import date, timedelta
 from enum import StrEnum
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field, model_validator
 
 APP_NAME = "Job Hunt Tracker"
@@ -157,6 +157,16 @@ class StatusChange(BaseModel):
 
 class StatusUpdate(BaseModel):
     status: Status
+
+
+class FollowUp(BaseModel):
+    id: str
+    company: str
+    role: str
+    status: Status
+    follow_up_date: date
+    days_overdue: int
+    next_action: str
 
 
 class Application(ApplicationCreate):
@@ -352,3 +362,28 @@ def update_status(application_id: str, update: StatusUpdate) -> Application:
     )
     logger.info("Application %s status: %s -> %s", application.id, old_status, update.status)
     return application
+
+
+@app.get("/follow-ups")
+def list_follow_ups(days_ahead: int = Query(default=0, ge=0, le=30)) -> list[FollowUp]:
+    """Открытые отклики, по которым пора действовать: сегодня, раньше или в ближайшие days_ahead дней."""
+    today = date.today()
+    deadline = today + timedelta(days=days_ahead)
+    due = [
+        a for a in applications.values()
+        if a.status not in CLOSED_STATUSES and a.follow_up_date is not None and a.follow_up_date <= deadline
+    ]
+    due.sort(key=lambda a: a.follow_up_date)
+    logger.info("Follow-ups due by %s: %d", deadline, len(due))
+    return [
+        FollowUp(
+            id=a.id,
+            company=a.company,
+            role=a.role,
+            status=a.status,
+            follow_up_date=a.follow_up_date,
+            days_overdue=(today - a.follow_up_date).days,
+            next_action=a.next_action,
+        )
+        for a in due
+    ]
