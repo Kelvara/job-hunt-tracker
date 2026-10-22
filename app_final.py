@@ -287,6 +287,46 @@ def find_duplicate(data: ApplicationCreate) -> Application | None:
     return None
 
 
+# --- Аналитика ---
+
+APPLIED_STAGES = {Status.APPLIED, Status.FOLLOW_UP_SENT, Status.INTERVIEW, Status.OFFER}
+INTERVIEW_STAGES = {Status.INTERVIEW, Status.OFFER}
+GROUP_FIELDS = ("source", "work_format", "industry", "grade")
+
+
+def statuses_seen(application: Application) -> set[Status]:
+    return {change.status for change in application.status_history}
+
+
+def was_applied(application: Application) -> bool:
+    return application.date_applied is not None or bool(statuses_seen(application) & APPLIED_STAGES)
+
+
+def reached_interview(application: Application) -> bool:
+    # Смотрим историю: отказ после интервью всё равно считается дошедшим до интервью
+    return bool(statuses_seen(application) & INTERVIEW_STAGES)
+
+
+def percent(part: int, whole: int) -> float:
+    return round(part / whole * 100, 1) if whole else 0.0
+
+
+def average(values: list[float]) -> float | None:
+    return round(sum(values) / len(values), 1) if values else None
+
+
+def funnel(items: list[Application]) -> dict:
+    """Сколько откликов отправлено, сколько дошло до интервью, и конверсия."""
+    applied = sum(was_applied(a) for a in items)
+    interviews = sum(reached_interview(a) for a in items)
+    return {
+        "total": len(items),
+        "applied": applied,
+        "interviews": interviews,
+        "interview_rate": percent(interviews, applied),
+    }
+
+
 # --- Приложение и маршруты ---
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
@@ -387,3 +427,48 @@ def list_follow_ups(days_ahead: int = Query(default=0, ge=0, le=30)) -> list[Fol
         )
         for a in due
     ]
+
+
+@app.get("/stats")
+def get_stats(group_by: str | None = None) -> dict:
+    """Воронка поиска; с group_by — конверсия в интервью по source, work_format, industry или grade."""
+    items = list(applications.values())
+
+    if group_by is not None:
+        if group_by not in GROUP_FIELDS:
+            logger.warning("Unknown group_by: %s", group_by)
+            raise HTTPException(status_code=400, detail=f"group_by must be one of: {', '.join(GROUP_FIELDS)}")
+        groups: dict[str, list[Application]] = {}
+        for a in items:
+            key = getattr(a, group_by) or "Not specified"
+            groups.setdefault(str(key), []).append(a)
+        logger.info("Stats by %s: %d groups", group_by, len(groups))
+        return {"group_by": group_by, "groups": {key: funnel(group) for key, group in sorted(groups.items())}}
+
+    offers = sum(Status.OFFER in statuses_seen(a) for a in items)
+    with_salary = [a for a in items if a.salary_min is not None or a.salary_max is not None]
+    salary_by_currency: dict[str, dict] = {}
+    for currency in Currency:
+        same = [a for a in with_salary if a.salary_currency == currency]
+        if same:
+            salary_by_currency[currency] = {
+                "count": len(same),
+                "average_min": average([a.salary_min for a in same if a.salary_min is not None]),
+                "average_max": average([a.salary_max for a in same if a.salary_max is not None]),
+            }
+    stats = funnel(items)
+    stats.update({
+        "by_status": {status: sum(a.status == status for a in items) for status in Status},
+        "offers": offers,
+        "offer_rate": percent(offers, stats["applied"]),
+        "salary": {
+            "with_salary_percent": percent(len(with_salary), len(items)),
+            "average_range": salary_by_currency,
+        },
+        "match_score": {
+            "reached_interview": average([a.match_score for a in items if a.match_score is not None and reached_interview(a)]),
+            "others": average([a.match_score for a in items if a.match_score is not None and not reached_interview(a)]),
+        },
+    })
+    logger.info("Stats: %d applications, interview rate %.1f%%", stats["total"], stats["interview_rate"])
+    return stats
