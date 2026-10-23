@@ -26,3 +26,23 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -v
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v7
+
+      - name: Upload tested application
+        uses: actions/upload-artifact@v7
+        with:
+          name: job-hunt-tracker
+          path: |
+            app_final.py
+            requirements.txt
+            .env.example
+            README.md
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
