@@ -1,10 +1,11 @@
 """Job Hunt Tracker — сервис для ведения откликов на вакансии.
 
-Каркас основан на учебном примере занятия 4 (FastAPI вместе).
+Каркас основан на учебном примере с занятия 4 (FastAPI).
 """
 
 import logging
 import os
+import re
 import time
 from datetime import date, timedelta
 from enum import StrEnum
@@ -36,6 +37,10 @@ def read_int_env(name: str, default: int) -> int:
 
 # Через сколько дней после отклика пора писать follow-up
 FOLLOW_UP_DAYS = read_int_env("FOLLOW_UP_DAYS", 7)
+
+# Пороги вердикта /match: процент совпадения навыков вакансии
+APPLY_NOW_THRESHOLD = read_int_env("APPLY_NOW_THRESHOLD", 75)
+TAILOR_THRESHOLD = read_int_env("TAILOR_THRESHOLD", 50)
 
 
 # --- Справочники: FastAPI сам вернёт 422 на значение не из списка ---
@@ -167,6 +172,36 @@ class FollowUp(BaseModel):
     follow_up_date: date
     days_overdue: int
     next_action: str
+
+
+class MatchRequest(BaseModel):
+    vacancy_text: str = Field(
+        min_length=1,
+        examples=["We need a Python developer with FastAPI, SQL and Docker. Kubernetes is a plus."],
+    )
+    candidate_skills: list[str] = Field(default=[], examples=[["Python", "SQL", "Git"]])
+    resume_bullets: list[str] = Field(
+        default=[],
+        examples=[[
+            "Organised team offsites",
+            "Wrote SQL reports for the sales team",
+            "Built a FastAPI service with Docker for internal analytics",
+        ]],
+    )
+
+
+class RankedBullet(BaseModel):
+    text: str
+    vacancy_skills: list[str]
+
+
+class MatchResult(BaseModel):
+    vacancy_skills: list[str]
+    matched: list[str]
+    missing: list[str]
+    match_percent: int
+    verdict: str
+    ranked_bullets: list[RankedBullet]
 
 
 class Application(ApplicationCreate):
@@ -327,6 +362,95 @@ def funnel(items: list[Application]) -> dict:
     }
 
 
+# --- Сравнение вакансии с навыками кандидата: словарь навыков + правила, без внешних сервисов ---
+
+# Навык -> варианты написания в тексте
+SKILLS = {
+    "Python": ["python"],
+    "SQL": ["sql"],
+    "PostgreSQL": ["postgresql", "postgres"],
+    "Java": ["java"],
+    "JavaScript": ["javascript", "js"],
+    "C++": ["c++"],
+    "Go": ["golang"],
+    "FastAPI": ["fastapi"],
+    "Django": ["django"],
+    "Flask": ["flask"],
+    "REST API": ["rest api", "restful"],
+    "Docker": ["docker"],
+    "Kubernetes": ["kubernetes", "k8s"],
+    "Linux": ["linux"],
+    "Git": ["git"],
+    "CI/CD": ["ci/cd", "github actions", "gitlab ci"],
+    "AWS": ["aws", "amazon web services"],
+    "GCP": ["gcp", "google cloud"],
+    "Azure": ["azure"],
+    "Pandas": ["pandas"],
+    "NumPy": ["numpy"],
+    "scikit-learn": ["scikit-learn", "sklearn"],
+    "PyTorch": ["pytorch"],
+    "TensorFlow": ["tensorflow"],
+    "Spark": ["spark", "pyspark"],
+    "Airflow": ["airflow"],
+    "Machine Learning": ["machine learning", "ml"],
+    "Deep Learning": ["deep learning"],
+    "NLP": ["nlp", "natural language processing"],
+    "Computer Vision": ["computer vision"],
+    "LLM": ["llm", "llms", "large language model", "large language models"],
+    "RAG": ["rag", "retrieval-augmented generation"],
+    "MLOps": ["mlops"],
+    "A/B testing": ["a/b"],
+    "Statistics": ["statistics"],
+    "Tableau": ["tableau"],
+    "Power BI": ["power bi"],
+}
+
+# Ищем целые слова: (?<!\w) и (?!\w) не дают найти "java" в "javascript" или "git" в "github"
+SKILL_PATTERNS = {
+    skill: re.compile("|".join(rf"(?<!\w){re.escape(alias)}(?!\w)" for alias in aliases), re.IGNORECASE)
+    for skill, aliases in SKILLS.items()
+}
+
+
+def find_skills(text: str) -> list[str]:
+    """Навыки из словаря, упомянутые в тексте, в порядке словаря."""
+    return [skill for skill, pattern in SKILL_PATTERNS.items() if pattern.search(text)]
+
+
+def run_match(request: MatchRequest) -> MatchResult:
+    vacancy_skills = find_skills(request.vacancy_text)
+    if not vacancy_skills:
+        logger.warning("Match: no known skills in vacancy text")
+        raise HTTPException(status_code=400, detail="No known skills found in vacancy_text")
+    # Навык кандидата — указан в списке или упомянут в пунктах резюме
+    candidate_skills = set(find_skills("\n".join(request.candidate_skills + request.resume_bullets)))
+    matched = [skill for skill in vacancy_skills if skill in candidate_skills]
+    missing = [skill for skill in vacancy_skills if skill not in candidate_skills]
+    match_percent = round(len(matched) / len(vacancy_skills) * 100)
+    if match_percent >= APPLY_NOW_THRESHOLD:
+        verdict = "Apply now"
+    elif match_percent >= TAILOR_THRESHOLD:
+        verdict = "Apply after tailoring"
+    else:
+        verdict = "Maybe"
+    # Пункты резюме не переписываем — только ставим выше те, что закрывают больше навыков вакансии
+    ranked = [
+        RankedBullet(text=bullet, vacancy_skills=[s for s in find_skills(bullet) if s in vacancy_skills])
+        for bullet in request.resume_bullets
+    ]
+    ranked.sort(key=lambda bullet: len(bullet.vacancy_skills), reverse=True)
+    logger.info("Match: %d%% (%d of %d vacancy skills) -> %s", match_percent, len(matched), len(vacancy_skills),
+                verdict)
+    return MatchResult(
+        vacancy_skills=vacancy_skills,
+        matched=matched,
+        missing=missing,
+        match_percent=match_percent,
+        verdict=verdict,
+        ranked_bullets=ranked,
+    )
+
+
 # --- Приложение и маршруты ---
 
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
@@ -472,3 +596,19 @@ def get_stats(group_by: str | None = None) -> dict:
     })
     logger.info("Stats: %d applications, interview rate %.1f%%", stats["total"], stats["interview_rate"])
     return stats
+
+
+@app.post("/match")
+def match_vacancy(request: MatchRequest) -> MatchResult:
+    """Сравнивает вакансию с навыками кандидата: совпадения, пробелы, вердикт и порядок пунктов резюме."""
+    return run_match(request)
+
+
+@app.post("/applications/{application_id}/match")
+def match_application(application_id: str, request: MatchRequest) -> MatchResult:
+    """То же сравнение, но процент совпадения сохраняется в отклик как match_score."""
+    application = find_application(application_id)
+    result = run_match(request)
+    application.match_score = result.match_percent
+    logger.info("Application %s match_score = %d", application.id, result.match_percent)
+    return result
