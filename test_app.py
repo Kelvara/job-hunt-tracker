@@ -149,6 +149,55 @@ def test_stats_unknown_group_by_returns_400():
     assert response.status_code == 400
 
 
+# --- Сравнение вакансии с навыками ---
+
+MATCH_REQUEST = {
+    "vacancy_text": "We need a Python developer with FastAPI, SQL and Docker. Kubernetes is a plus.",
+    "candidate_skills": ["Python", "SQL", "Git"],
+    "resume_bullets": [
+        "Organised team offsites",
+        "Wrote SQL reports for the sales team",
+        "Built a FastAPI service with Docker for internal analytics",
+    ],
+}
+
+
+def test_match_returns_matched_missing_and_verdict():
+    response = client.post("/match", json=MATCH_REQUEST)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["vacancy_skills"] == ["Python", "SQL", "FastAPI", "Docker", "Kubernetes"]
+    assert body["missing"] == ["Kubernetes"]
+    assert body["match_percent"] == 80
+    assert body["verdict"] == "Apply now"
+
+
+def test_match_ranks_bullets_without_changing_text():
+    response = client.post("/match", json=MATCH_REQUEST)
+    ranked = [bullet["text"] for bullet in response.json()["ranked_bullets"]]
+    assert ranked == [
+        "Built a FastAPI service with Docker for internal analytics",
+        "Wrote SQL reports for the sales team",
+        "Organised team offsites",
+    ]
+    assert sorted(ranked) == sorted(MATCH_REQUEST["resume_bullets"])
+
+
+def test_find_skills_matches_whole_words_only():
+    assert app_final.find_skills("JavaScript and GitHub Actions") == ["JavaScript", "CI/CD"]
+
+
+def test_match_without_known_skills_returns_400():
+    response = client.post("/match", json={"vacancy_text": "Friendly team and good coffee"})
+    assert response.status_code == 400
+
+
+def test_match_application_saves_match_score():
+    response = client.post("/applications/A-0003/match", json=MATCH_REQUEST)
+    assert response.status_code == 200
+    assert client.get("/applications/A-0003").json()["match_score"] == 80
+
+
 # --- Настройки из окружения ---
 
 def test_read_int_env_falls_back_on_invalid_value(monkeypatch):
