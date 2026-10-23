@@ -33,6 +33,8 @@
 
 Нужны Python 3.12 или новее и Git. Проект проверен на Python 3.12 (GitHub Actions, Ubuntu) и Python 3.14 (macOS).
 
+Сначала проверьте версию: `python3 --version`. Если она ниже 3.12 (например, системный Python 3.9 на macOS), установка зависимостей завершится ошибкой `No matching distribution found for fastapi`. В этом случае создайте окружение нужной версией Python явно, например `python3.12 -m venv .venv`.
+
 ```bash
 git clone https://github.com/Kelvara/job-hunt-tracker.git
 cd job-hunt-tracker
